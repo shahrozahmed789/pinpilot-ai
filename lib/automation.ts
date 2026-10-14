@@ -126,3 +126,99 @@ export async function createDailyBatch(settings: Settings, force = false) {
   const rows = [];
   for (let i = 0; i < ideas.length; i++) {
     const idea = ideas[i];
+    const png = await renderPinPng(idea, settings.niche);
+    const slug = idea.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 48) || 'pin';
+    const imageUrl = await saveImage(png, `${today}/${now}-${i}-${slug}.png`);
+    rows.push({ board_id: boardId, title: idea.title.slice(0, 100), description: `${idea.description} ${idea.keywords.map(k => `#${k.replace(/[^a-z0-9 ]/gi, '').split(/\s+/).join('')}`).join(' ')}`.slice(0, 800), image_url: imageUrl, destination_url: settings.destination_url, scheduled_at: new Date(now + Math.max(15 * 60 * 1000, gapMs * (i + 1))).toISOString(), status: 'queued', buffer_post_id: null, source_keywords: idea.keywords, source: 'PinPilot template renderer' });
+  }
+  const { data, error } = await db.from('pin_queue').insert(rows).select('id,title,scheduled_at,status');
+  if (error) throw new Error(`Queue insert failed: ${error.message}`);
+  const { error: settingsError } = await db.from('automation_settings').update({ board_id: boardId, board_name: boardName, last_batch_date: today, last_batch_at: new Date().toISOString(), updated_at: new Date().toISOString() }).eq('id', 'primary');
+  if (settingsError) throw new Error(`Could not update automation settings: ${settingsError.message}`);
+  await recordRun('succeeded', `Generated ${rows.length} Pin image(s) and queued them on board “${boardName}”. Research: ${researchSummary}`);
+  return { created: rows.length, queued: data || [], boardId, boardName, researchSummary, message: `${rows.length} original template-rendered Pin images and SEO drafts were created and scheduled automatically. Research: ${researchSummary}` };
+}
+async function publishDue() {
+  const db = supabase();
+  const mode = bufferMode();
+  const target = await getBufferPinterestTarget();
+
+  // First deployment is deliberately read-only: prove that the Buffer key can
+  // read the account, Pinterest channel, and board before creating any posts.
+  if (mode === 'test') {
+    return [{ id: 'buffer-connection', status: 'test_mode', message: `Buffer connection verified for channel “${target.channelName}” and board “${target.boardName}”. No posts were sent to Buffer.` }];
+  }
+
+  const { data: due, error } = await db.from('pin_queue').select('*')
+    .eq('status', 'queued')
+    .is('buffer_post_id', null)
+    .lte('scheduled_at', new Date().toISOString())
+    .order('scheduled_at', { ascending: true })
+    .limit(3);
+  if (error) throw error;
+
+  const results: Array<{ id: string; status: string; message?: string }> = [];
+  for (const item of due || []) {
+    // Claim the row before calling Buffer so overlapping cron runs do not create duplicates.
+    const { data: claimed, error: claimError } = await db.from('pin_queue')
+      .update({ status: 'publishing', attempt_count: (Number(item.attempt_count) || 0) + 1, updated_at: new Date().toISOString() })
+      .eq('id', item.id).eq('status', 'queued').is('buffer_post_id', null).select('id').maybeSingle();
+    if (claimError) { results.push({ id: item.id, status: 'claim_error', message: claimError.message }); continue; }
+    if (!claimed) continue;
+
+    try {
+      const itemTarget = await getBufferPinterestTarget(item.board_id);
+      const created = await createBufferPinterestPost({
+        target: itemTarget,
+        title: String(item.title || 'PinPilot Pin'),
+        description: String(item.description || ''),
+        imageUrl: String(item.image_url || ''),
+        destinationUrl: item.destination_url ? String(item.destination_url) : null,
+        mode,
+      });
+      const finalStatus = mode === 'draft' ? 'buffer_draft' : 'buffer_scheduled';
+      const { error: doneError } = await db.from('pin_queue').update({
+        status: finalStatus,
+        buffer_post_id: created.id,
+        last_error: null,
+        scheduled_at: created.dueAt || item.scheduled_at,
+        updated_at: new Date().toISOString(),
+      }).eq('id', item.id);
+      if (doneError) throw doneError;
+      results.push({ id: item.id, status: finalStatus, message: mode === 'draft'
+        ? `Pin sent to Buffer as a draft (${created.id}); it will not publish until you schedule it in Buffer.`
+        : `Pin scheduled in Buffer (${created.id}).` });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Unknown Buffer publishing error';
+      const attempts = Number(item.attempt_count || 0) + 1;
+      const retryable = attempts < 3;
+      const update = retryable
+        ? { status: 'queued', scheduled_at: new Date(Date.now() + attempts * 60 * 60 * 1000).toISOString(), last_error: message.slice(0, 1000), updated_at: new Date().toISOString() }
+        : { status: 'failed', last_error: message.slice(0, 1000), updated_at: new Date().toISOString() };
+      await db.from('pin_queue').update(update).eq('id', item.id);
+      results.push({ id: item.id, status: retryable ? 'retry_scheduled' : 'failed', message });
+    }
+  }
+  return results;
+}
+
+export async function runAutomationTick(options?: { forceNewBatch?: boolean }) {
+  const db = supabase();
+  const { data: settings, error } = await db.from('automation_settings').select('*').eq('id', 'primary').maybeSingle();
+  if (error) throw error;
+  if (!settings || !settings.enabled) return { enabled: false, generated: 0, published: [], message: 'Automation is paused or not configured.' };
+  const batch = await createDailyBatch(settings as Settings, Boolean(options?.forceNewBatch));
+  const published = await publishDue();
+  let analyticsMessage = 'Pinterest analytics are deferred until official API reporting is enabled.';
+  try { const snapshot = await captureAnalyticsSnapshotIfDue(); analyticsMessage = snapshot.message; }
+  catch (e) { analyticsMessage = e instanceof Error ? e.message : 'Analytics snapshot unavailable.'; await recordRun('warning', 'Background analytics sync could not complete.', analyticsMessage); }
+  const mode = bufferMode();
+  const submitted = published.filter((item) => item.status === 'buffer_draft' || item.status === 'buffer_scheduled').length;
+  const publishSummary = mode === 'test'
+    ? 'Buffer connection test passed; no posts were submitted.'
+    : mode === 'draft'
+      ? `${submitted} due Pin(s) sent to Buffer as drafts.`
+      : `${submitted} due Pin(s) scheduled in Buffer.`;
+  await recordRun('succeeded', `Automation tick finished. Generated ${batch.created} new Pin(s). ${publishSummary} ${analyticsMessage}`);
+  return { enabled: true, generated: batch.created, batchMessage: batch.message, published, analyticsMessage, bufferMode: mode, message: `${batch.message} ${publishSummary} ${analyticsMessage}` };
+}
