@@ -39,14 +39,23 @@ export async function POST(req: NextRequest) {
 
     // Discover Buffer's Pinterest channel and board. No Pinterest API token is required
     // for this temporary Buffer-publishing workflow.
-    const target = await getBufferPinterestTarget(previous?.board_id || null);
+    let target: Awaited<ReturnType<typeof getBufferPinterestTarget>> | null = null;
+    let bufferConnectionWarning: string | null = null;
+    try {
+      target = await getBufferPinterestTarget(previous?.board_id || null);
+    } catch (error) {
+      // Pin generation should still work if Buffer is temporarily unavailable.
+      bufferConnectionWarning = error instanceof Error ? error.message : 'Buffer connection could not be verified.';
+    }
+    const selectedBoardId = target?.boardServiceId || previous?.board_id || null;
+    const selectedBoardName = target?.boardName || previous?.board_name || null;
     const sameConfig = previous
       && previous.niche === niche
       && previous.destination_url === destination.toString()
       && previous.audience === audience
       && Number(previous.daily_pin_limit) === dailyPinLimit
       && previous.timezone === timezone
-      && previous.board_id === target.boardServiceId;
+      && (!target || previous.board_id === target.boardServiceId);
 
     const { error } = await db.from('automation_settings').upsert({
       id: 'primary',
@@ -55,8 +64,8 @@ export async function POST(req: NextRequest) {
       destination_url: destination.toString(),
       daily_pin_limit: dailyPinLimit,
       timezone,
-      board_id: target.boardServiceId,
-      board_name: target.boardName,
+      board_id: selectedBoardId,
+      board_name: selectedBoardName,
       enabled: true,
       last_batch_date: sameConfig ? previous.last_batch_date : null,
       updated_at: new Date().toISOString(),
@@ -69,8 +78,9 @@ export async function POST(req: NextRequest) {
       ok: true,
       enabled: true,
       provider: 'Buffer',
-      boardName: target.boardName,
-      channelName: target.channelName,
+      boardName: selectedBoardName || 'Buffer board not verified',
+      channelName: target?.channelName || null,
+      bufferConnectionWarning,
       bufferMode: mode,
       message: run.message || `Buffer automation is configured in ${mode} mode.`,
       run,
