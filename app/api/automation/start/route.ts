@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { isAdminRequest } from '@/lib/admin';
 import { supabase } from '@/lib/server';
-import { getBufferPinterestTarget, bufferMode } from '@/lib/buffer';
+import { bufferMode } from '@/lib/buffer';
 import { runAutomationTick } from '@/lib/automation';
 import { isSafePublicWebsiteUrl } from '@/lib/site-intelligence';
 
@@ -39,23 +39,36 @@ export async function POST(req: NextRequest) {
 
     // Discover Buffer's Pinterest channel and board. No Pinterest API token is required
     // for this temporary Buffer-publishing workflow.
-    let target: Awaited<ReturnType<typeof getBufferPinterestTarget>> | null = null;
-    let bufferConnectionWarning: string | null = null;
-    try {
-      target = await getBufferPinterestTarget(previous?.board_id || null);
-    } catch (error) {
-      // Pin generation should still work if Buffer is temporarily unavailable.
-      bufferConnectionWarning = error instanceof Error ? error.message : 'Buffer connection could not be verified.';
+    // Generation is a local Supabase/creative workflow. Never query Buffer during Start;
+    // the scheduled worker handles publishing separately when Buffer is needed.
+    const selectedBoardId = previous?.board_id || null;
+    const selectedBoardName = previous?.board_name || null;
+    const replacePending = body.replacePending === true;
+
+    if (replacePending) {
+      // Pause briefly before replacing only locally queued, unsubmitted Pins.
+      const { error: pauseError } = await db.from('automation_settings')
+        .update({ enabled: false, updated_at: new Date().toISOString() })
+        .eq('id', 'primary');
+      if (pauseError) throw new Error('Could not pause the worker before replacing pending Pins: ' + pauseError.message);
+
+      const { error: replaceError } = await db.from('pin_queue')
+        .update({
+          status: 'cancelled',
+          last_error: 'Replaced from PinPilot dashboard before generating a fresh batch.',
+          updated_at: new Date().toISOString(),
+        })
+        .eq('status', 'queued')
+        .is('buffer_post_id', null);
+      if (replaceError) throw new Error('Could not clear old unsubmitted Pins: ' + replaceError.message);
     }
-    const selectedBoardId = target?.boardServiceId || previous?.board_id || null;
-    const selectedBoardName = target?.boardName || previous?.board_name || null;
     const sameConfig = previous
       && previous.niche === niche
       && previous.destination_url === destination.toString()
       && previous.audience === audience
       && Number(previous.daily_pin_limit) === dailyPinLimit
       && previous.timezone === timezone
-      && (!target || previous.board_id === target.boardServiceId);
+      && previous.board_id === selectedBoardId;
 
     const { error } = await db.from('automation_settings').upsert({
       id: 'primary',
@@ -67,21 +80,21 @@ export async function POST(req: NextRequest) {
       board_id: selectedBoardId,
       board_name: selectedBoardName,
       enabled: true,
-      last_batch_date: sameConfig ? previous.last_batch_date : null,
+      last_batch_date: replacePending ? null : sameConfig ? previous.last_batch_date : null,
       updated_at: new Date().toISOString(),
     });
     if (error) throw error;
 
     // An explicit Start click requests a fresh batch instead of silently skipping today's existing batch.
-    const run = await runAutomationTick({ forceNewBatch: true });
+    const run = await runAutomationTick({ forceNewBatch: true, skipBuffer: true });
     const mode = bufferMode();
     return NextResponse.json({
       ok: true,
       enabled: true,
       provider: 'Buffer',
-      boardName: selectedBoardName || 'Buffer board not verified',
-      channelName: target?.channelName || null,
-      bufferConnectionWarning,
+      boardName: selectedBoardName || 'Buffer board will be selected when publishing',
+      channelName: null,
+      generationOnly: true,
       bufferMode: mode,
       message: run.message || `Buffer automation is configured in ${mode} mode.`,
       run,
