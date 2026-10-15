@@ -72,7 +72,8 @@ export async function POST(req: NextRequest) {
     });
     if (error) throw error;
 
-    const run = await runAutomationTick({ forceNewBatch: !sameConfig });
+    // An explicit Start click requests a fresh batch instead of silently skipping today's existing batch.
+    const run = await runAutomationTick({ forceNewBatch: true });
     const mode = bufferMode();
     return NextResponse.json({
       ok: true,
