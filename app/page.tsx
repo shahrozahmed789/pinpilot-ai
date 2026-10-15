@@ -142,7 +142,7 @@ export default function Home() {
     setBusy(true); setStatus('Generating your Pin batch in PinPilot. Buffer publishing is a separate step…');
     try {
       const d = await api('/api/automation/start', 'POST', { niche, audience, destinationUrl: destination.trim(), dailyPinLimit: Number(cadence), timezone });
-      setActive(true); setAccountConnected(true); setLiveBoardName(d.boardName || 'Default board selected');
+      setActive(true);
       setActivities(prev => [makeActivity('Automation started', d.message || 'Settings saved; the background worker will process the pipeline.', 'success'), ...prev].slice(0, 14)); setStatus(d.message || 'Automation enabled. Background jobs will run on the server schedule.');
       await refreshQueueOnly();
     } catch (e) { setStatus(e instanceof Error ? e.message : 'Unable to start live automation'); }
