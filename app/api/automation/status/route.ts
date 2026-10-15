@@ -13,7 +13,7 @@ export async function GET(req: NextRequest) {
       .eq('id', 'primary').maybeSingle();
     if (settingsError) throw settingsError;
 
-    const { data: queue, error: queueError } = await db.from('pin_queue').select('*').order('scheduled_at', { ascending: true }).limit(100);
+    const { data: queue, error: queueError } = await db.from('pin_queue').select('*').neq('status', 'cancelled').order('scheduled_at', { ascending: true }).limit(100);
     if (queueError) throw queueError;
     const { data: runs, error: runsError } = await db.from('automation_runs').select('id,status,summary,error_text,started_at,finished_at').order('finished_at', { ascending: false }).limit(12);
     if (runsError) throw runsError;
