@@ -3,6 +3,7 @@ import { isAdminRequest } from '@/lib/admin';
 import { supabase } from '@/lib/server';
 import { getBufferPinterestTarget, bufferMode } from '@/lib/buffer';
 import { runAutomationTick } from '@/lib/automation';
+import { isSafePublicWebsiteUrl } from '@/lib/site-intelligence';
 
 export const runtime = 'nodejs';
 
@@ -17,7 +18,9 @@ export async function POST(req: NextRequest) {
     const audience = typeof body.audience === 'string' ? body.audience.trim().slice(0, 80) : 'United States';
     const destinationUrl = typeof body.destinationUrl === 'string' ? body.destinationUrl.trim() : '';
     const dailyPinLimit = Math.max(1, Math.min(5, Number(body.dailyPinLimit) || 2));
-    const timezone = typeof body.timezone === 'string' ? body.timezone : 'UTC';
+    const timezone = typeof body.timezone === 'string' ? body.timezone : 'America/Los_Angeles';
+    try { new Intl.DateTimeFormat('en-US', { timeZone: timezone }).format(new Date()); }
+    catch { return NextResponse.json({ error: 'Select a valid IANA timezone.' }, { status: 400 }); }
 
     if (!niche) return NextResponse.json({ error: 'Enter a niche before starting.' }, { status: 400 });
     let destination: URL;
@@ -25,6 +28,9 @@ export async function POST(req: NextRequest) {
     catch { return NextResponse.json({ error: 'Enter a valid destination URL beginning with https:// or http://.' }, { status: 400 }); }
     if (destination.protocol !== 'https:' && destination.protocol !== 'http:') {
       return NextResponse.json({ error: 'Destination must be an HTTP or HTTPS website URL.' }, { status: 400 });
+    }
+    if (!(await isSafePublicWebsiteUrl(destination.toString()))) {
+      return NextResponse.json({ error: 'Destination must be a public website URL without embedded credentials or private/local hostnames.' }, { status: 400 });
     }
 
     const db = supabase();
@@ -37,7 +43,9 @@ export async function POST(req: NextRequest) {
     const sameConfig = previous
       && previous.niche === niche
       && previous.destination_url === destination.toString()
+      && previous.audience === audience
       && Number(previous.daily_pin_limit) === dailyPinLimit
+      && previous.timezone === timezone
       && previous.board_id === target.boardServiceId;
 
     const { error } = await db.from('automation_settings').upsert({

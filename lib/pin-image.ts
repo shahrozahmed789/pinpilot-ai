@@ -1,3 +1,4 @@
+import sharp from 'sharp';
 import 'server-only';
 import { deflateSync } from 'node:zlib';
 import type { PinIdea } from './ideas';
@@ -54,4 +55,38 @@ export function renderPinPng(idea: PinIdea, niche: string): Buffer {
   text('A LITTLE INSPIRATION',110,1060,5,white,770); text('IDEAS  TIPS  DETAILS  GUIDES',110,1140,3,white,770);
   rect(110,1205,230,7,p.accent); text('ORIGINAL TEMPLATE DESIGN',78,1372,3,p.ink,820);
   return encodePng(width,height,pixels);
+}
+
+
+/**
+ * Compose a public product/page image into the existing branded 2:3 Pin design.
+ * This creates a clean, original editorial mockup, not a fake claim of photo-realistic AI imagery.
+ */
+export async function renderProductPinPng(idea: PinIdea, niche: string, sourceImage: Buffer): Promise<Buffer> {
+  const base = renderPinPng(idea, niche);
+  const p = palettes[(idea.style || 0) % palettes.length];
+  const rgb = (value: RGB) => 'rgb(' + value.join(',') + ')';
+  const panelSvg = Buffer.from(
+    '<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="1500">' +
+      '<defs><filter id="s" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="10" stdDeviation="14" flood-color="#0b1220" flood-opacity=".16"/></filter></defs>' +
+      '<rect x="44" y="770" width="912" height="570" rx="36" fill="#ffffff" filter="url(#s)"/>' +
+      '<rect x="62" y="788" width="876" height="534" rx="26" fill="' + rgb(p.bg) + '" stroke="' + rgb(p.soft) + '" stroke-width="5"/>' +
+      '<rect x="92" y="818" width="118" height="8" rx="4" fill="' + rgb(p.accent) + '"/>' +
+      '<text x="92" y="858" font-family="Arial, Helvetica, sans-serif" font-size="23" font-weight="700" fill="' + rgb(p.ink) + '">A CLOSER LOOK</text>' +
+      '<rect x="92" y="1264" width="816" height="3" fill="' + rgb(p.soft) + '"/>' +
+      '<text x="92" y="1301" font-family="Arial, Helvetica, sans-serif" font-size="20" font-weight="700" letter-spacing="1" fill="' + rgb(p.accent) + '">EXPLORE DETAILS • SAVE FOR LATER</text>' +
+    '</svg>'
+  );
+  const image = await sharp(sourceImage, { failOn: 'none' })
+    .rotate()
+    .resize(760, 370, { fit: 'contain', background: rgb(p.bg) })
+    .png()
+    .toBuffer();
+  return sharp(base)
+    .composite([
+      { input: panelSvg, left: 0, top: 0 },
+      { input: image, left: 120, top: 874 },
+    ])
+    .png({ compressionLevel: 8, palette: true })
+    .toBuffer();
 }
