@@ -113,7 +113,7 @@ export default function Home() {
     if (!adminAuthenticated) { setLoginOpen(true); return; }
     try {
       const q = await api('/api/automation/status');
-      const queueRows = Array.isArray(q.items) ? q.items.map((p: any) => ({
+      const queueRows = Array.isArray(q.items) ? q.items.filter((p: any) => String(p.status || '').toLowerCase() !== 'cancelled').map((p: any) => ({
         id: String(p.id),
         title: p.title || 'Untitled Pin',
         description: p.description || '',
@@ -202,7 +202,7 @@ export default function Home() {
         if (pinterestMetrics[key] !== null && pinterestMetrics[key] !== undefined) analytics[key] = pinterestMetrics[key];
       }
       setLiveAnalytics(analytics);
-      const queueRows = Array.isArray(q.items) ? q.items.map((p: any) => ({ id: String(p.id), title: p.title || 'Untitled Pin', description: p.description || '', keywords: Array.isArray(p.source_keywords) ? p.source_keywords : [], boardName: p.board_name || p.board_id || 'Pinterest board', destination: p.destination_url || '', scheduledAt: p.scheduled_at || p.created_at || '', createdAt: p.created_at || '', status: String(p.status || 'queued').toUpperCase().replace(/_/g, ' '), imageUrl: p.image_url, pinterestPinId: p.pinterest_pin_id, bufferPostId: p.buffer_post_id })) : [];
+      const queueRows = Array.isArray(q.items) ? q.items.filter((p: any) => String(p.status || '').toLowerCase() !== 'cancelled').map((p: any) => ({ id: String(p.id), title: p.title || 'Untitled Pin', description: p.description || '', keywords: Array.isArray(p.source_keywords) ? p.source_keywords : [], boardName: p.board_name || p.board_id || 'Pinterest board', destination: p.destination_url || '', scheduledAt: p.scheduled_at || p.created_at || '', createdAt: p.created_at || '', status: String(p.status || 'queued').toUpperCase().replace(/_/g, ' '), imageUrl: p.image_url, pinterestPinId: p.pinterest_pin_id, bufferPostId: p.buffer_post_id })) : [];
       setPins(queueRows.slice(0, 100));
       setActive(!!q.enabled);
       setStatus(`${buffer.message} Queue refreshed. Full Pinterest analytics remain deferred until official Pinterest API access is enabled.`);
