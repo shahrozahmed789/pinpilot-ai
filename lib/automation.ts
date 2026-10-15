@@ -219,15 +219,29 @@ async function captureAnalyticsSnapshotIfDue() {
   if (analyticsError) await recordRun('warning', 'Analytics snapshot saved with unavailable values.', analyticsError);
   return { skipped: false, message: analyticsError ? `Analytics snapshot saved with some unavailable data: ${analyticsError}` : 'Pinterest analytics snapshot saved.' };
 }
-export async function createDailyBatch(settings: Settings, force = false) {
+export async function createDailyBatch(settings: Settings, force = false, skipBufferLookup = false) {
   const db = supabase();
   const timezone = settings.timezone || 'America/Los_Angeles';
   const today = dayInTimezone(timezone);
   if (!force && settings.last_batch_date === today) return { created: 0, skipped: true, message: "Today's batch is already prepared for " + today + "." };
 
-  const target = await getBufferPinterestTarget(settings.board_id);
-  const boardId = target.boardServiceId;
-  const boardName = target.boardName;
+  let boardId = settings.board_id || 'buffer-board-pending';
+  let boardName = settings.board_name || 'Buffer board pending';
+  if (!skipBufferLookup) {
+    try {
+      const target = await getBufferPinterestTarget(settings.board_id);
+      boardId = target.boardServiceId;
+      boardName = target.boardName;
+    } catch (error) {
+      // Generating the creative batch must not depend on Buffer being online.
+      // The publishing worker can resolve the real board later, when Buffer is available.
+      await recordRun(
+        'warning',
+        'Buffer is unavailable during batch generation; Pins will remain in the local queue.',
+        error instanceof Error ? error.message : 'Buffer connection could not be verified.',
+      );
+    }
+  }
   let siteSnapshot: SiteSnapshot | undefined;
   let siteSummary = 'Website intelligence unavailable; template copy used.';
   try {
@@ -292,7 +306,8 @@ export async function createDailyBatch(settings: Settings, force = false) {
     const title = idea.title.slice(0, 100);
     const description = (idea.description + ' ' + idea.keywords.map(k => '#' + k.replace(/[^a-z0-9 ]/gi, '').split(/\s+/).join('')).join(' ')).slice(0, 800);
     const scheduleDate = dayInTimezone(timezone, new Date(slots[i].scheduledAt));
-    const keyMaterial = JSON.stringify([settings.niche, settings.audience, settings.destination_url, timezone, scheduleDate, slots[i].scheduledAt, title, boardId]);
+    const batchNonce = Date.now();
+    const keyMaterial = JSON.stringify([settings.niche, settings.audience, settings.destination_url, timezone, scheduleDate, slots[i].scheduledAt, title, boardId, batchNonce]);
     const idempotencyKey = createHash('sha256').update(keyMaterial).digest('hex');
     const checks = {
       titlePresent: Boolean(title.trim()),
@@ -406,34 +421,52 @@ async function publishDue(timezone: string) {
   return results;
 }
 
-export async function runAutomationTick(options?: { forceNewBatch?: boolean }) {
+export async function runAutomationTick(options?: { forceNewBatch?: boolean; skipBuffer?: boolean }) {
   const db = supabase();
   const { data: settings, error } = await db.from('automation_settings').select('*').eq('id', 'primary').maybeSingle();
   if (error) throw error;
 
-  let bufferSyncMessage = 'Buffer post status sync was unavailable.';
-  try {
-    const sync = await syncBufferPostsAndMetrics();
-    bufferSyncMessage = sync.message;
-  } catch (e) {
-    bufferSyncMessage = e instanceof Error ? e.message : 'Buffer post status sync failed.';
-    await recordRun('warning', 'Buffer post synchronization could not complete.', bufferSyncMessage);
+  let bufferSyncMessage = options?.skipBuffer
+    ? 'Buffer checks skipped for this generation request; pins are saved locally.'
+    : 'Buffer post status sync was unavailable.';
+  if (!options?.skipBuffer) {
+    try {
+      const sync = await syncBufferPostsAndMetrics();
+      bufferSyncMessage = sync.message;
+    } catch (e) {
+      bufferSyncMessage = e instanceof Error ? e.message : 'Buffer post status sync failed.';
+      await recordRun('warning', 'Buffer post synchronization could not complete.', bufferSyncMessage);
+    }
   }
   if (!settings || !settings.enabled) {
     return { enabled: false, generated: 0, published: [], bufferSyncMessage, message: 'Automation is paused or not configured. Existing posts already scheduled in Buffer may still publish; this tick only checked their status. ' + bufferSyncMessage };
   }
-  const batch = await createDailyBatch(settings as Settings, Boolean(options?.forceNewBatch));
-  const published = await publishDue(settings.timezone || 'America/Los_Angeles');
+  const batch = await createDailyBatch(settings as Settings, Boolean(options?.forceNewBatch), Boolean(options?.skipBuffer));
+  let published: Array<{ id: string; status: string; message?: string }> = [];
+  if (options?.skipBuffer) {
+    published = [{ id: 'generation-only', status: 'not_submitted', message: 'Pin generation completed without contacting Buffer.' }];
+  } else {
+    try {
+      published = await publishDue(settings.timezone || 'America/Los_Angeles');
+    } catch (e) {
+      // An outbound provider error must not turn successful local Pin generation into a failed Start response.
+      const message = e instanceof Error ? e.message : 'Buffer publishing is temporarily unavailable.';
+      published = [{ id: 'buffer-connection', status: 'connection_error', message }];
+      await recordRun('warning', 'Pins were generated, but Buffer publishing could not run.', message);
+    }
+  }
   let analyticsMessage = 'Pinterest analytics are deferred until official API reporting is enabled.';
   try { const snapshot = await captureAnalyticsSnapshotIfDue(); analyticsMessage = snapshot.message; }
   catch (e) { analyticsMessage = e instanceof Error ? e.message : 'Analytics snapshot unavailable.'; await recordRun('warning', 'Background analytics sync could not complete.', analyticsMessage); }
   const mode = bufferMode();
   const submitted = published.filter((item) => item.status === 'buffer_draft' || item.status === 'buffer_scheduled').length;
-  const publishSummary = mode === 'test'
-    ? 'Buffer connection test passed; no posts were submitted.'
-    : mode === 'draft'
-      ? `${submitted} due Pin(s) sent to Buffer as drafts.`
-      : `${submitted} Pin(s) submitted to Buffer with their planned future times.`;
+  const publishSummary = options?.skipBuffer
+    ? 'Publishing was intentionally skipped; fresh Pins are ready in the local PinPilot queue.'
+    : mode === 'test'
+      ? 'Buffer connection test passed; no posts were submitted.'
+      : mode === 'draft'
+        ? `${submitted} due Pin(s) sent to Buffer as drafts.`
+        : `${submitted} Pin(s) submitted to Buffer with their planned future times.`;
   await recordRun('succeeded', `Automation tick finished. Generated ${batch.created} new Pin(s). ${publishSummary} ${bufferSyncMessage} ${analyticsMessage}`);
   return { enabled: true, generated: batch.created, batchMessage: batch.message, published, analyticsMessage, bufferMode: mode, message: `${batch.message} ${publishSummary} ${bufferSyncMessage} ${analyticsMessage}` };
 }

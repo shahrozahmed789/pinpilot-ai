@@ -109,19 +109,72 @@ export default function Home() {
       setBusy(false);
     }, 350);
   }
+  async function refreshQueueOnly() {
+    if (!adminAuthenticated) { setLoginOpen(true); return; }
+    try {
+      const q = await api('/api/automation/status');
+      const queueRows = Array.isArray(q.items) ? q.items.filter((p: any) => String(p.status || '').toLowerCase() !== 'cancelled').map((p: any) => ({
+        id: String(p.id),
+        title: p.title || 'Untitled Pin',
+        description: p.description || '',
+        keywords: Array.isArray(p.source_keywords) ? p.source_keywords : [],
+        boardName: p.board_name || p.board_id || 'Pinterest board',
+        destination: p.destination_url || '',
+        scheduledAt: p.scheduled_at || p.created_at || '',
+        createdAt: p.created_at || '',
+        status: String(p.status || 'queued').toUpperCase().replace(/_/g, ' '),
+        imageUrl: p.image_url,
+        pinterestPinId: p.pinterest_pin_id,
+        bufferPostId: p.buffer_post_id,
+      })) : [];
+      setPins(queueRows.slice(0, 100));
+      setActive(!!q.enabled);
+      setLiveBoardName(q.settings?.board_name || liveBoardName);
+    } catch (e) {
+      setStatus(e instanceof Error ? e.message : 'Unable to refresh the local Pin queue.');
+    }
+  }
   async function startLive() {
     if (!niche.trim()) { setStatus('Enter your niche first.'); return; }
     if (!destination.trim() || !/^https?:\/\//i.test(destination.trim())) { setStatus('Enter your site/shop destination URL first.'); return; }
     if (!adminConfigured) { setStatus('Live automation is locked until DASHBOARD_PASSWORD and DASHBOARD_SESSION_SECRET are set on Netlify. Demo mode remains available.'); return; }
     if (!adminAuthenticated) { setLoginOpen(true); setStatus('Unlock your private dashboard before changing live automation settings.'); return; }
-    setBusy(true); setStatus('Saving settings and checking the Buffer connection in safe test mode…');
+    setBusy(true); setStatus('Generating your Pin batch in PinPilot. Buffer publishing is a separate step…');
     try {
       const d = await api('/api/automation/start', 'POST', { niche, audience, destinationUrl: destination.trim(), dailyPinLimit: Number(cadence), timezone });
-      setActive(true); setAccountConnected(true); setLiveBoardName(d.boardName || 'Default board selected');
+      setActive(true);
       setActivities(prev => [makeActivity('Automation started', d.message || 'Settings saved; the background worker will process the pipeline.', 'success'), ...prev].slice(0, 14)); setStatus(d.message || 'Automation enabled. Background jobs will run on the server schedule.');
-      await refreshLive();
+      await refreshQueueOnly();
     } catch (e) { setStatus(e instanceof Error ? e.message : 'Unable to start live automation'); }
     finally { setBusy(false); }
+  }
+  async function regenerateLiveBatch() {
+    if (demoMode) { setStatus('Switch to live mode and unlock the private dashboard to regenerate the saved queue.'); return; }
+    if (!niche.trim()) { setStatus('Enter your niche first.'); return; }
+    if (!destination.trim().startsWith('https://') && !destination.trim().startsWith('http://')) { setStatus('Enter your site/shop destination URL first.'); return; }
+    if (!adminConfigured) { setStatus('Set the private dashboard security variables on Netlify first.'); return; }
+    if (!adminAuthenticated) { setLoginOpen(true); setStatus('Unlock the private dashboard before regenerating Pins.'); return; }
+    setBusy(true);
+    setStatus('Replacing only unsubmitted queued Pins and generating 2 fresh Pins. Buffer will not be contacted during generation…');
+    try {
+      const d = await api('/api/automation/start', 'POST', {
+        niche,
+        audience,
+        destinationUrl: destination.trim(),
+        dailyPinLimit: Number(cadence),
+        timezone,
+        replacePending: true,
+      });
+      setDemoMode(false);
+      setActive(true);
+      setStatus(d.run?.batchMessage || d.message || 'Fresh Pins were generated in the PinPilot queue.');
+      setActivities(prev => [makeActivity('Fresh batch generated', d.run?.message || d.message || 'PinPilot generated a new local batch.', 'success'), ...prev].slice(0, 14));
+      await refreshQueueOnly();
+    } catch (e) {
+      setStatus(e instanceof Error ? e.message : 'Unable to generate a fresh Pin batch.');
+    } finally {
+      setBusy(false);
+    }
   }
   async function pauseLive() {
     if (demoMode) { setActive(false); setActivities(a => [makeActivity('Demo automation paused', 'No additional demo batches will be generated until Start is pressed again.'), ...a].slice(0, 14)); setStatus('Demo automation paused.'); return; }
@@ -149,7 +202,7 @@ export default function Home() {
         if (pinterestMetrics[key] !== null && pinterestMetrics[key] !== undefined) analytics[key] = pinterestMetrics[key];
       }
       setLiveAnalytics(analytics);
-      const queueRows = Array.isArray(q.items) ? q.items.map((p: any) => ({ id: String(p.id), title: p.title || 'Untitled Pin', description: p.description || '', keywords: Array.isArray(p.source_keywords) ? p.source_keywords : [], boardName: p.board_name || p.board_id || 'Pinterest board', destination: p.destination_url || '', scheduledAt: p.scheduled_at || p.created_at || '', createdAt: p.created_at || '', status: String(p.status || 'queued').toUpperCase().replace(/_/g, ' '), imageUrl: p.image_url, pinterestPinId: p.pinterest_pin_id, bufferPostId: p.buffer_post_id })) : [];
+      const queueRows = Array.isArray(q.items) ? q.items.filter((p: any) => String(p.status || '').toLowerCase() !== 'cancelled').map((p: any) => ({ id: String(p.id), title: p.title || 'Untitled Pin', description: p.description || '', keywords: Array.isArray(p.source_keywords) ? p.source_keywords : [], boardName: p.board_name || p.board_id || 'Pinterest board', destination: p.destination_url || '', scheduledAt: p.scheduled_at || p.created_at || '', createdAt: p.created_at || '', status: String(p.status || 'queued').toUpperCase().replace(/_/g, ' '), imageUrl: p.image_url, pinterestPinId: p.pinterest_pin_id, bufferPostId: p.buffer_post_id })) : [];
       setPins(queueRows.slice(0, 100));
       setActive(!!q.enabled);
       setStatus(`${buffer.message} Queue refreshed. Full Pinterest analytics remain deferred until official Pinterest API access is enabled.`);
@@ -230,7 +283,7 @@ export default function Home() {
       </div>
       <div className="panel performancePanel"><div className="panelHead"><div><span className="stepNo">04</span><div><h2>Account insights</h2><p>Only show real metrics. Buffer reporting is limited; full Pinterest analytics will follow API approval.</p></div></div><select className="rangeSelect" value={range} onChange={e => setRange(e.target.value)}><option value="7">7 days</option><option value="30">30 days</option><option value="90">90 days</option></select></div><div className="analyticsBlank"><div className="chartIcon"><span/><span/><span/><span/><span/></div><strong>{demoMode ? 'Waiting for real analytics' : 'Analytics reporting is not enabled yet'}</strong><p>{demoMode ? 'Demo numbers are intentionally not fabricated.' : 'Shows only metrics returned by Buffer per-post reporting or the official Pinterest API. Provider updates may lag.'}</p><button className="outlineButton" onClick={refreshLive} disabled={busy || demoMode}>{busy ? 'Refreshing…' : 'Refresh Buffer & queue'}</button></div><div className="analyticsMini"><div><span>Saves</span><strong>{demoMode ? '—' : fmt(liveAnalytics.saves)}</strong></div><div><span>Outbound CTR</span><strong>{demoMode ? '—' : fmt(liveAnalytics.outbound_ctr)}</strong></div><div><span>Last sync</span><strong>{demoMode ? '—' : (typeof liveAnalytics.last_synced === 'string' ? new Date(liveAnalytics.last_synced).toLocaleString() : '—')}</strong></div></div></div>
     </section>
-    <section className="panel queuePanel"><div className="panelHead"><div><span className="stepNo">05</span><div><h2>Automated Pin queue</h2><p>Start Automation creates and schedules the full batch. No one-by-one queue clicks.</p></div></div><span className="smallBadge">{pins.length} RECORDS</span></div>
+    <section className="panel queuePanel"><div className="panelHead"><div><span className="stepNo">05</span><div><h2>Automated Pin queue</h2><p>Generate fresh Pins here without sending Buffer API requests.</p></div></div><div style={{display:'flex',gap:8,alignItems:'center',flexWrap:'wrap'}}><button className="heroGhost" onClick={regenerateLiveBatch} disabled={busy || demoMode}>{busy ? 'Working…' : `Generate Fresh ${cadence} Pins`}</button><span className="smallBadge">{pins.length} RECORDS</span></div></div>
       {pins.length === 0 ? <div className="emptyState"><div className="emptyIcon">✦</div><strong>Your queue is ready for its first batch</strong><p>Enter your niche, set a destination, and press Start Automation above.</p></div> : <div className="pinGrid">{pins.slice(0, 8).map(pin => <article className="pinCard" key={pin.id}><div className="pinPreview">{pin.imageData ? <img src={pin.imageData} alt={`Preview for ${pin.title}`}/> : pin.imageUrl ? <img src={pin.imageUrl} alt={`Pin: ${pin.title}`}/> : <div className="noPreview">Image preview<br/>not available</div>}<span className="pinStatus">{pin.status}</span></div><div className="pinContent"><strong>{pin.title}</strong><p>{pin.description}</p><div className="pinKeywords">{pin.keywords.slice(0, 3).map(k => <span key={k}>{k}</span>)}</div><div className="pinMeta"><span>◷ {new Date(pin.scheduledAt || pin.createdAt).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZone: timezone })}</span><a href={pin.destination} target="_blank" rel="noreferrer">Destination ↗</a></div></div></article>)}</div>}
       {nextPin && <div className="queueFooter"><span>Next scheduled: <b>{nextPin.title}</b></span><span>{new Date(nextPin.scheduledAt).toLocaleString([], { timeZone: timezone, dateStyle: 'medium', timeStyle: 'short' })}</span></div>}
     </section>
