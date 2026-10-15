@@ -225,9 +225,21 @@ export async function createDailyBatch(settings: Settings, force = false) {
   const today = dayInTimezone(timezone);
   if (!force && settings.last_batch_date === today) return { created: 0, skipped: true, message: "Today's batch is already prepared for " + today + "." };
 
-  const target = await getBufferPinterestTarget(settings.board_id);
-  const boardId = target.boardServiceId;
-  const boardName = target.boardName;
+  let boardId = settings.board_id || 'buffer-board-pending';
+  let boardName = settings.board_name || 'Buffer board pending';
+  try {
+    const target = await getBufferPinterestTarget(settings.board_id);
+    boardId = target.boardServiceId;
+    boardName = target.boardName;
+  } catch (error) {
+    // Generating the creative batch must not depend on Buffer being online.
+    // The publishing worker can resolve the real board later, when Buffer is available.
+    await recordRun(
+      'warning',
+      'Buffer is unavailable during batch generation; Pins will remain in the local queue.',
+      error instanceof Error ? error.message : 'Buffer connection could not be verified.',
+    );
+  }
   let siteSnapshot: SiteSnapshot | undefined;
   let siteSummary = 'Website intelligence unavailable; template copy used.';
   try {
@@ -423,7 +435,15 @@ export async function runAutomationTick(options?: { forceNewBatch?: boolean }) {
     return { enabled: false, generated: 0, published: [], bufferSyncMessage, message: 'Automation is paused or not configured. Existing posts already scheduled in Buffer may still publish; this tick only checked their status. ' + bufferSyncMessage };
   }
   const batch = await createDailyBatch(settings as Settings, Boolean(options?.forceNewBatch));
-  const published = await publishDue(settings.timezone || 'America/Los_Angeles');
+  let published: Array<{ id: string; status: string; message?: string }> = [];
+  try {
+    published = await publishDue(settings.timezone || 'America/Los_Angeles');
+  } catch (e) {
+    // An outbound provider error must not turn successful local Pin generation into a failed Start response.
+    const message = e instanceof Error ? e.message : 'Buffer publishing is temporarily unavailable.';
+    published = [{ id: 'buffer-connection', status: 'connection_error', message }];
+    await recordRun('warning', 'Pins were generated, but Buffer publishing could not run.', message);
+  }
   let analyticsMessage = 'Pinterest analytics are deferred until official API reporting is enabled.';
   try { const snapshot = await captureAnalyticsSnapshotIfDue(); analyticsMessage = snapshot.message; }
   catch (e) { analyticsMessage = e instanceof Error ? e.message : 'Analytics snapshot unavailable.'; await recordRun('warning', 'Background analytics sync could not complete.', analyticsMessage); }
