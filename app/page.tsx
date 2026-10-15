@@ -151,7 +151,7 @@ export default function Home() {
   async function regenerateLiveBatch() {
     if (demoMode) { setStatus('Switch to live mode and unlock the private dashboard to regenerate the saved queue.'); return; }
     if (!niche.trim()) { setStatus('Enter your niche first.'); return; }
-    if (!destination.trim() || !/^https?:\\/\\//i.test(destination.trim())) { setStatus('Enter your site/shop destination URL first.'); return; }
+    if (!destination.trim().startsWith('https://') && !destination.trim().startsWith('http://')) { setStatus('Enter your site/shop destination URL first.'); return; }
     if (!adminConfigured) { setStatus('Set the private dashboard security variables on Netlify first.'); return; }
     if (!adminAuthenticated) { setLoginOpen(true); setStatus('Unlock the private dashboard before regenerating Pins.'); return; }
     setBusy(true);
