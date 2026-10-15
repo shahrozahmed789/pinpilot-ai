@@ -153,8 +153,12 @@ export async function createBufferPinterestPost(input: {
   imageUrl: string;
   destinationUrl?: string | null;
   mode: Exclude<BufferMode, 'test'>;
+  scheduledAt?: string;
 }): Promise<BufferPostResult> {
   if (!input.imageUrl.startsWith('https://')) throw new Error('Pin image must use a public HTTPS URL.');
+  if (input.mode === 'queue' && (!input.scheduledAt || !Number.isFinite(Date.parse(input.scheduledAt)) || Date.parse(input.scheduledAt) <= Date.now() + 60_000)) {
+    throw new Error('Queue mode requires a valid future scheduledAt timestamp.');
+  }
   if (input.mode === 'queue' && input.target.channelIsQueuePaused) {
     throw new Error('The Pinterest channel queue is paused in Buffer. Resume it in Buffer before queue mode can schedule Pins.');
   }
@@ -185,7 +189,8 @@ export async function createBufferPinterestPost(input: {
     text: input.description.slice(0, 800),
     channelId: input.target.channelId,
     schedulingType: 'automatic',
-    mode: 'addToQueue',
+    mode: input.mode === 'queue' ? 'customScheduled' : 'addToQueue',
+    ...(input.mode === 'queue' ? { dueAt: input.scheduledAt } : {}),
     saveToDraft: input.mode === 'draft',
     assets: [{ image: { url: input.imageUrl } }],
     metadata,
@@ -203,4 +208,54 @@ export async function createBufferPinterestPost(input: {
   if (!result.post?.id) throw new Error('Buffer accepted the request but returned no post ID.');
 
   return { id: result.post.id, status: result.post.status || (input.mode === 'draft' ? 'draft' : 'scheduled'), dueAt: result.post.dueAt || null };
+}
+
+export type BufferLivePost = {
+  id: string;
+  status: string;
+  dueAt: string | null;
+  channelId: string;
+  metrics: Array<{ type?: string | null; name?: string | null; value?: number | null; unit?: string | null }> | null;
+  metricsUpdatedAt: string | null;
+};
+
+/** Read recent posts for the connected Pinterest channel and available metrics. */
+export async function listBufferPinterestPosts(target: BufferPinterestTarget): Promise<BufferLivePost[]> {
+  const queryWithMetrics = [
+    'query GetPinterestChannelPosts($organizationId: OrganizationId!, $channelId: ChannelId!) {',
+    ' posts(first: 100, input: { organizationId: $organizationId, filter: { channelIds: [$channelId], status: [scheduled, sending, sent, error] } }) {',
+    '  edges { node { id status dueAt channelId metrics { type name value unit } metricsUpdatedAt } }',
+    '  pageInfo { hasNextPage endCursor }',
+    ' }',
+    '}',
+  ].join('\n');
+  const queryWithoutMetrics = [
+    'query GetPinterestChannelPosts($organizationId: OrganizationId!, $channelId: ChannelId!) {',
+    ' posts(first: 100, input: { organizationId: $organizationId, filter: { channelIds: [$channelId], status: [scheduled, sending, sent, error] } }) {',
+    '  edges { node { id status dueAt channelId } }',
+    '  pageInfo { hasNextPage endCursor }',
+    ' }',
+    '}',
+  ].join('\n');
+  type Result = { posts?: { edges?: Array<{ node?: any }> } };
+  const variables = { organizationId: target.organizationId, channelId: target.channelId };
+  let data: Result;
+  let metricsAccessible = true;
+  try {
+    data = await bufferGraphQL<Result>(queryWithMetrics, variables);
+  } catch {
+    metricsAccessible = false;
+    data = await bufferGraphQL<Result>(queryWithoutMetrics, variables);
+  }
+  return (data.posts?.edges || []).map(edge => {
+    const node = edge.node || {};
+    return {
+      id: String(node.id || ''),
+      status: String(node.status || ''),
+      dueAt: node.dueAt ? String(node.dueAt) : null,
+      channelId: String(node.channelId || ''),
+      metrics: metricsAccessible && Array.isArray(node.metrics) ? node.metrics : null,
+      metricsUpdatedAt: metricsAccessible && node.metricsUpdatedAt ? String(node.metricsUpdatedAt) : null,
+    };
+  }).filter(post => Boolean(post.id));
 }

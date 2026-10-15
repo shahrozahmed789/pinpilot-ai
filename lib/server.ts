@@ -34,7 +34,7 @@ export async function getPinterestToken() {
   if (new Date(data.expires_at).getTime() < Date.now() + 5 * 60_000) {
     if (!data.encrypted_refresh_token) throw new Error('Token expired. Reconnect Pinterest.');
     const basic = Buffer.from(`${process.env.PINTEREST_CLIENT_ID}:${process.env.PINTEREST_CLIENT_SECRET}`).toString('base64');
-    const response = await fetch('https://api.pinterest.com/v5/oauth/token', { method: 'POST', headers: { Authorization: `Basic ${basic}`, 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ grant_type: 'refresh_token', refresh_token: decryptToken(data.encrypted_refresh_token) }) });
+    const response = await fetch('https://api.pinterest.com/v5/oauth/token', { method: 'POST', headers: { Authorization: `Basic ${basic}`, 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ grant_type: 'refresh_token', refresh_token: decryptToken(data.encrypted_refresh_token) }), signal: AbortSignal.timeout(5_000) });
     const fresh = await response.json();
     if (!response.ok) throw new Error(`Pinterest token refresh failed (${response.status}). Reconnect Pinterest if needed.`);
     access = fresh.access_token;

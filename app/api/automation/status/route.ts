@@ -15,11 +15,15 @@ export async function GET(req: NextRequest) {
 
     const { data: queue, error: queueError } = await db.from('pin_queue').select('*').order('scheduled_at', { ascending: true }).limit(100);
     if (queueError) throw queueError;
+    const { data: runs, error: runsError } = await db.from('automation_runs').select('id,status,summary,error_text,started_at,finished_at').order('finished_at', { ascending: false }).limit(12);
+    if (runsError) throw runsError;
     const items = queue || [];
     return NextResponse.json({
       enabled: !!settings?.enabled,
       settings: settings || null,
       items,
+      runs: runs || [],
+      reviewRequired: items.filter((p: any) => p.status === 'review_required').length,
       queued: items.filter((p: any) => p.status === 'queued' || p.status === 'publishing').length,
       bufferDrafts: items.filter((p: any) => p.status === 'buffer_draft').length,
       bufferScheduled: items.filter((p: any) => p.status === 'buffer_scheduled').length,
